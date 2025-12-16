@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"     # Per l'host (tuo PC)
+      - "29092:29092"   # ⬅️ AGGIUNGI QUESTA! Per i container Docker
+#    networks:
+#      - debezium-net
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # CORREGGI I LISTENERS:
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # AGGIUNGI QUESTE PROPRIETÀ PER KRaft:
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+#    networks:
+#      - debezium-net
+    depends_on:
+      - kafka
+      - connect
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.3
+    hostname: mysql
+    container_name: mysql
+    ports:
+      - "3307:3306" # Manteniamo la tua porta personalizzata
+#    networks:
+#      - debezium-net
+    volumes:
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: db_cdc
+      MYSQL_USER: cdc_user
+      MYSQL_PASSWORD: cdc_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+    command: >
+      sh -c "echo '[mysqld]\nlog_bin = mysql-bin\nserver_id = 1\nbinlog_format = ROW\ntransaction-isolation = READ-COMMITTED' > /etc/mysql/conf.d/my.cnf 
+      && /usr/local/bin/docker-entrypoint.sh mysqld"
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin
+    ports:
+      - "8081:80"
+#    networks:
+#      - debezium-net
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: cdc_user
+      PMA_PASSWORD: cdc_password
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  connect:
+    image: debezium/connect:2.7.0.Final
+    hostname: connect
+    container_name: connect
+    ports:
+      - "8083:8083"
+#    networks:
+#      - debezium-net
+    depends_on:
+      kafka:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+    environment:
+#      PATH: "/opt/kafka/bin:${PATH}"
+#      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/kafka/bin"
+#      PATH: /kafka/bin:${PATH}
+#      PATH: "/opt/kafka/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      BOOTSTRAP_SERVERS: kafka:29092 # Usa il listener interno di Kafka
+#      GROUP_ID: 1
+      GROUP_ID: "connect-single"
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+#      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+#      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+#      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+#      KAFKA_NODE_ID: 1
+#      KAFKA_PROCESS_ROLES: broker,controller
+#      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+#      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+
+      REST_ADVERTISED_HOST_NAME: connect
+
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    restart: always
+#    command: >
+#      bash -c "
+#        echo 'Waiting for Kafka Connect to start...' &&
+#        while ! curl -s http://localhost:8083/ >/dev/null; do sleep 2; done &&
+#        echo 'Kafka Connect ready! Registering MySQL connector...' &&
+#        curl -s -X GET http://localhost:8083/connectors | grep mysql-cdc >/dev/null ||
+#        curl -X POST -H 'Content-Type: application/json' http://localhost:8083/connectors -d '{
+#          \"name\": \"mysql-cdc\",
+#          \"config\": {
+#            \"connector.class\": \"io.debezium.connector.mysql.MySqlConnector\",
+#            \"database.hostname\": \"mysql\",
+#            \"database.port\": \"3306\",
+#            \"database.user\": \"cdc_user\",
+#            \"database.password\": \"cdc_password\",
+#            \"database.server.id\": \"184054\",
+#            \"topic.prefix\": \"mysql\",
+#            \"database.include.list\": \"db_cdc\",
+#            \"schema.history.internal.kafka.bootstrap.servers\": \"kafka:29092\",
+#            \"schema.history.internal.kafka.topic\": \"schema-changes.db_cdc\",
+#            \"snapshot.mode\": \"initial\",
+#            \"tasks.max\": \"1\"
+#          }
+#        }' &&
+#        echo 'Connector registered (or already exists)' &&
+#        tail -f /kafka/logs/connect.log"
+
+  init-connector:
+    image: curlimages/curl:8.5.0
+    container_name: init-connector
+    depends_on:
+      connect:
+        condition: service_started
+    volumes:
+      - ./init-connector.sh:/init-connector.sh
+    entrypoint: ["/bin/sh", "/init-connector.sh"]
+    restart: "no"
+
+#networks:
+#  debezium-net:
+#    driver: bridge
+
