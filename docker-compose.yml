@@ -1,14 +1,25 @@
-version: '3.8'
+#version: '3.8'
 
 services:
+  #   docker exec -it kafka bash
 
+  #   docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --topic test-topic --partitions 1 --replication-factor 1
+
+  #  /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --topic test-topic --partitions 1 --replication-factor 1
+
+  #   /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:29092 --topic test-topic
+
+  #   /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+  #  docker-compose exec kafka /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server kafka:29092
+
+  #   /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic mysql.db_cdc.test --from-beginning
   kafka:
     image: apache/kafka:3.7.0
     container_name: kafka
     hostname: kafka
     ports:
       - "9092:9092"     # Per l'host (tuo PC)
-      - "29092:29092"   # ⬅️ AGGIUNGI QUESTA! Per i container Docker
+      - "29092:29092"   # Per i container Docker
 #    networks:
 #      - debezium-net
     environment:
@@ -32,23 +43,80 @@ services:
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
     restart: unless-stopped
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
+  connect:
+    image: debezium/connect:2.7.0.Final
+    hostname: connect
+    container_name: connect
     ports:
-      - "8080:8080"
-#    networks:
-#      - debezium-net
+      - "8083:8083"
+    #    networks:
+    #      - debezium-net
     depends_on:
-      - kafka
-      - connect
+      kafka:
+        condition: service_started
+      mysql:
+        condition: service_healthy
     environment:
-      KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
-    restart: unless-stopped
+      #      PATH: "/opt/kafka/bin:${PATH}"
+      #      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/kafka/bin"
+      #      PATH: /kafka/bin:${PATH}
+      #      PATH: "/opt/kafka/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      BOOTSTRAP_SERVERS: kafka:29092 # Usa il listener interno di Kafka
+      #      GROUP_ID: 1
+      GROUP_ID: "connect-single"
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
 
+      #      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      #      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      #      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      #      KAFKA_NODE_ID: 1
+      #      KAFKA_PROCESS_ROLES: broker,controller
+      #      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      #      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+
+      REST_ADVERTISED_HOST_NAME: connect
+
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    restart: always
+  #    command: >
+  #      bash -c "
+  #        echo 'Waiting for Kafka Connect to start...' &&
+  #        while ! curl -s http://localhost:8083/ >/dev/null; do sleep 2; done &&
+  #        echo 'Kafka Connect ready! Registering MySQL connector...' &&
+  #        curl -s -X GET http://localhost:8083/connectors | grep mysql-cdc >/dev/null ||
+  #        curl -X POST -H 'Content-Type: application/json' http://localhost:8083/connectors -d '{
+  #          \"name\": \"mysql-cdc\",
+  #          \"config\": {
+  #            \"connector.class\": \"io.debezium.connector.mysql.MySqlConnector\",
+  #            \"database.hostname\": \"mysql\",
+  #            \"database.port\": \"3306\",
+  #            \"database.user\": \"cdc_user\",
+  #            \"database.password\": \"cdc_password\",
+  #            \"database.server.id\": \"184054\",
+  #            \"topic.prefix\": \"mysql\",
+  #            \"database.include.list\": \"db_cdc\",
+  #            \"schema.history.internal.kafka.bootstrap.servers\": \"kafka:29092\",
+  #            \"schema.history.internal.kafka.topic\": \"schema-changes.db_cdc\",
+  #            \"snapshot.mode\": \"initial\",
+  #            \"tasks.max\": \"1\"
+  #          }
+  #        }' &&
+  #        echo 'Connector registered (or already exists)' &&
+  #        tail -f /kafka/logs/connect.log"
+
+  # docker exec mysql mysql -u cdc_user -pcdc_password -e "CREATE TABLE db_cdc.utenti (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(255), PRIMARY KEY (id));"
+  # docker exec mysql mysql -u cdc_user -pcdc_password -e "USE db_cdc; INSERT INTO utenti (name) VALUES ('ciccio');"
   mysql:
     image: mysql:8.3
     hostname: mysql
@@ -58,7 +126,7 @@ services:
 #    networks:
 #      - debezium-net
     volumes:
-      - ./mysql-init:/docker-entrypoint-initdb.d
+      - ./mysql:/docker-entrypoint-initdb.d
     environment:
       MYSQL_ROOT_PASSWORD: root_password
       MYSQL_DATABASE: db_cdc
@@ -74,11 +142,174 @@ services:
       sh -c "echo '[mysqld]\nlog_bin = mysql-bin\nserver_id = 1\nbinlog_format = ROW\ntransaction-isolation = READ-COMMITTED' > /etc/mysql/conf.d/my.cnf 
       && /usr/local/bin/docker-entrypoint.sh mysqld"
 
+  # docker exec -it spark-master /opt/spark/bin/spark-shell --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2
+  # val streamingDF = spark.readStream.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load();
+  # val query = streamingDF.selectExpr("CAST(value AS STRING) as json_message").writeStream.outputMode("append").format("console").option("truncate", false).start();
+
+  # spark.read.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load().selectExpr("CAST(value AS STRING) as json").show(false)
+
+  # val batchDF = spark.read.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").option("endingOffsets", "latest").load().limit(5);
+  # batchDF.selectExpr("CAST(value AS STRING) as json").show(false)
+
+  # docker exec -u root spark-master pip install requests
+  # docker exec -it spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
+  # docker exec -it spark-master /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    hostname: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+#    command: >
+#      bash -c "
+#        /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master &
+#        sleep 5 &&
+#        pip install --root-user-action=ignore requests --quiet &&
+#        /opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
+#      "
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      SPARK_MASTER_WEBUI_PORT: 8080
+    #      SPARK_NO_DAEMONIZE: true
+    ports:
+      - "7077:7077"
+      - "8089:8080"   # UI Master → http://localhost:8080
+    volumes:
+      - ./spark/app:/opt/spark/app
+#      - ./spark/jars:/opt/spark/jars
+    restart: unless-stopped
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    hostname: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_WEBUI_PORT: 8081
+    #      SPARK_NO_DAEMONIZE: true
+    ports:
+      - "8084:8081"   # UI Worker
+    volumes:
+      - ./spark/app:/opt/spark/app
+#      - ./spark/app:/opt/spark-apps
+    restart: unless-stopped
+
+#  docker exec -it flink-jobmanager bash
+#  docker exec -it flink-jobmanager /opt/flink/bin/sql-client.sh
+#  docker exec -it flink /opt/flink/bin/sql-client.sh
+#  docker exec -it flink-client /opt/flink/bin/sql-client.sh
+#  docker exec -it flink-http /opt/flink/bin/sql-client.sh
+  flink-jobmanager:
+    image: apache/flink:1.19.0-scala_2.12-java11
+    container_name: flink-jobmanager
+    hostname: flink-jobmanager
+    ports:
+      - "8091:8081"  # Flink Web UI
+    command: jobmanager
+#    command: >
+#      bash -c "
+#        /opt/flink/bin/flink start jobmanager &
+#        echo 'Attendo JobManager...' &&
+#        sleep 15 &&
+#        echo 'Sottometto il job...' &&
+#        /opt/flink/bin/flink run -c KafkaToHttp /opt/flink/usrlib/flink-job-1.0.jar
+#      "
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        rest.bind-address: 0.0.0.0
+    volumes:
+      - ./flink/jars:/opt/flink/usrlib  # Cartella per i job JAR
+    restart: unless-stopped
+
+  flink-taskmanager:
+    image: apache/flink:1.19.0-scala_2.12-java11
+    container_name: flink-taskmanager
+    hostname: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+    volumes:
+      - ./flink/jars:/opt/flink/usrlib
+    restart: unless-stopped
+
+#  docker logs flink-job -f
+  flink-job:
+#    image: maven:3.9-eclipse-temurin-11
+    build:
+      context: ./flink
+      dockerfile: Dockerfile.job
+    container_name: flink-job
+    hostname: flink-job
+    volumes:
+      - ./flink/job:/app/source:rw
+      - ./flink/jars:/app/jars:rw
+      # Cache Maven per velocizzare
+#      - maven-repo:/root/.m2
+      - maven-cache:/root/.m2
+    depends_on:
+      - kafka
+#      - flink-jobmanager
+#      - flink-taskmanager
+#    environment:
+#      FLINK_JOBMANAGER_HOST: flink-jobmanager
+#    command: bash -c "cd /app/source && mvn clean package -DskipTests && java -cp /app/source/target/flink-job-1.0.jar:/opt/flink/lib/* KafkaToHttp"
+    restart: on-failure
+
+  fastapi-flink:
+    build: ./fastapi
+    container_name: fastapi-flink
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  flask-spark:
+    image: python:3.12-slim
+    container_name: flask-spark
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./flask:/app
+    working_dir: /app
+    command: >
+      bash -c "
+        pip install flask --quiet &&
+        python main.py
+      "
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    #    networks:
+    #      - debezium-net
+    depends_on:
+      - kafka
+      - connect
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    restart: unless-stopped
+
   phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
     container_name: phpmyadmin
     ports:
-      - "8081:80"
+      - "8085:80"
 #    networks:
 #      - debezium-net
     environment:
@@ -91,78 +322,6 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  connect:
-    image: debezium/connect:2.7.0.Final
-    hostname: connect
-    container_name: connect
-    ports:
-      - "8083:8083"
-#    networks:
-#      - debezium-net
-    depends_on:
-      kafka:
-        condition: service_started
-      mysql:
-        condition: service_healthy
-    environment:
-#      PATH: "/opt/kafka/bin:${PATH}"
-#      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/kafka/bin"
-#      PATH: /kafka/bin:${PATH}
-#      PATH: "/opt/kafka/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      BOOTSTRAP_SERVERS: kafka:29092 # Usa il listener interno di Kafka
-#      GROUP_ID: 1
-      GROUP_ID: "connect-single"
-      CONFIG_STORAGE_TOPIC: connect_configs
-      OFFSET_STORAGE_TOPIC: connect_offsets
-      STATUS_STORAGE_TOPIC: connect_statuses
-      CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      STATUS_STORAGE_REPLICATION_FACTOR: 1
-
-#      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-#      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-#      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-#      KAFKA_NODE_ID: 1
-#      KAFKA_PROCESS_ROLES: broker,controller
-#      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-#      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-
-      REST_ADVERTISED_HOST_NAME: connect
-
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-    restart: always
-#    command: >
-#      bash -c "
-#        echo 'Waiting for Kafka Connect to start...' &&
-#        while ! curl -s http://localhost:8083/ >/dev/null; do sleep 2; done &&
-#        echo 'Kafka Connect ready! Registering MySQL connector...' &&
-#        curl -s -X GET http://localhost:8083/connectors | grep mysql-cdc >/dev/null ||
-#        curl -X POST -H 'Content-Type: application/json' http://localhost:8083/connectors -d '{
-#          \"name\": \"mysql-cdc\",
-#          \"config\": {
-#            \"connector.class\": \"io.debezium.connector.mysql.MySqlConnector\",
-#            \"database.hostname\": \"mysql\",
-#            \"database.port\": \"3306\",
-#            \"database.user\": \"cdc_user\",
-#            \"database.password\": \"cdc_password\",
-#            \"database.server.id\": \"184054\",
-#            \"topic.prefix\": \"mysql\",
-#            \"database.include.list\": \"db_cdc\",
-#            \"schema.history.internal.kafka.bootstrap.servers\": \"kafka:29092\",
-#            \"schema.history.internal.kafka.topic\": \"schema-changes.db_cdc\",
-#            \"snapshot.mode\": \"initial\",
-#            \"tasks.max\": \"1\"
-#          }
-#        }' &&
-#        echo 'Connector registered (or already exists)' &&
-#        tail -f /kafka/logs/connect.log"
-
   init-connector:
     image: curlimages/curl:8.5.0
     container_name: init-connector
@@ -174,7 +333,22 @@ services:
     entrypoint: ["/bin/sh", "/init-connector.sh"]
     restart: "no"
 
+#  jupyter:
+#    image: jupyter/pyspark-notebook:latest
+#    container_name: jupyter-spark
+#    ports:
+#      - "8888:8888"
+#    volumes:
+#      - ./spark:/home/jovyan/work
+#    environment:
+#      - SPARK_OPTS=--master=spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0
+#    networks:
+#      - debezium-net
+#    command: start-notebook.sh --NotebookApp.token=''
+
 #networks:
 #  debezium-net:
 #    driver: bridge
 
+volumes:
+  maven-cache: # Crea un volume persistente per le librerie Maven

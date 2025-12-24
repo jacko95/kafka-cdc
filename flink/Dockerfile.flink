@@ -1,0 +1,11 @@
+FROM apache/flink:1.19.0-scala_2.12-java11
+
+# Installa wget se non presente
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
+# Scarica il connettore Kafka per Flink SQL
+RUN wget -q -O /opt/flink/lib/flink-sql-connector-kafka-3.2.0-1.19.jar \
+    https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.2.0-1.19/flink-sql-connector-kafka-3.2.0-1.19.jar
+
+# Verifica che il file sia stato scaricato
+RUN ls -la /opt/flink/lib/*kafka* 2>/dev/null || echo "Connettore non trovato"

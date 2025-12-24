@@ -1,0 +1,20 @@
+FROM maven:3.9-eclipse-temurin-11 AS builder
+
+WORKDIR /app
+COPY job/pom.xml .
+# Scarica le dipendenze (cache)
+# RUN mvn dependency:go-offline -B
+RUN mvn dependency:resolve -B
+
+COPY job/src ./src
+RUN mvn clean package -DskipTests
+
+FROM apache/flink:1.19.0-scala_2.12-java11
+
+# Copia il JAR costruito
+COPY --from=builder /app/target/flink-job-1.0.jar /opt/flink/usrlib/job.jar
+
+# Avvia il job automaticamente
+# CMD ["bash", "-c", "echo 'Attendo Kafka...' && sleep 30 && /opt/flink/bin/flink run -d /opt/flink/usrlib/job.jar"]
+# CMD ["bash", "-c", "echo 'Attendo Kafka e Flink...' && sleep 45 && /opt/flink/bin/flink run -m flink-jobmanager:8081 -d /opt/flink/usrlib/job.jar"]
+CMD ["java", "-cp", "/opt/flink/usrlib/job.jar:/opt/flink/lib/*", "KafkaToHttp"]
