@@ -4,9 +4,9 @@ set -e
 
 CONNECTOR_NAME="mysql-cdc"
 
-echo "⏳ Attendo Kafka Connect su http://connect:8083 ..."
+echo "⏳ Attendo Kafka Connect su http://debezium:8083 ..."
 
-until curl -s http://connect:8083/ > /dev/null; do
+until curl -s http://debezium:8083/ > /dev/null; do
   echo "Kafka Connect non pronto, riprovo tra 5s..."
   sleep 5
 done
@@ -14,15 +14,15 @@ done
 echo "✅ Kafka Connect è online"
 
 # Se il connettore esiste già, lo elimino
-if curl -s http://connect:8083/connectors/${CONNECTOR_NAME} > /dev/null; then
+if curl -s http://debezium:8083/connectors/${CONNECTOR_NAME} > /dev/null; then
   echo "⚠️ Connettore ${CONNECTOR_NAME} già presente, lo elimino"
-  curl -s -X DELETE http://connect:8083/connectors/${CONNECTOR_NAME}
+  curl -s -X DELETE http://debezium:8083/connectors/${CONNECTOR_NAME}
   sleep 2
 fi
 
 echo "🚀 Registro il connettore Debezium MySQL (${CONNECTOR_NAME})"
 
-curl -f -X POST http://connect:8083/connectors \
+curl -f -X POST http://debezium:8083/connectors \
   -H "Content-Type: application/json" \
   -d '{
     "name": "mysql-cdc",

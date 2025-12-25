@@ -13,7 +13,7 @@ def log_request_info():
     if request.method == "POST" and request.path == "/events":
         print("\n" + "═" * 80)
         print("📨 RICEVUTA RICHIESTA HTTP POST su /events")
-        print("🕐 Timestamp:", datetime.datetime.utcnow().isoformat() + "Z")
+        # print("🕐 Timestamp:", datetime.datetime.utcnow().isoformat() + "Z")
         print("═" * 80)
 
 @app.route("/events", methods=["POST"])
@@ -53,7 +53,7 @@ def receive_events():
     return jsonify({
         "status": "ok",
         "received": True,
-        "processed_at": datetime.datetime.utcnow().isoformat() + "Z",
+        # "processed_at": datetime.datetime.utcnow().isoformat() + "Z",
         "operation": op
     })
 

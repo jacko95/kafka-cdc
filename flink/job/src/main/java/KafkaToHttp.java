@@ -220,14 +220,13 @@ import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public class KafkaToHttp {
     public static void main(String[] args) throws Exception {
-//         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironment();
-        env.setParallelism(1);  // Aggiungi questa riga per stabilità
+        env.setParallelism(1);
 
-        // 1. Sorgente Kafka
         KafkaSource<String> source = KafkaSource.<String>builder()
                 .setBootstrapServers("kafka:29092")
                 .setTopics("mysql.db_cdc.utenti")
@@ -242,20 +241,16 @@ public class KafkaToHttp {
                 "Kafka CDC Source"
         );
 
-        // 2. Processa e invia HTTP
         DataStream<String> resultStream = kafkaStream
                 .map(new HttpSender())
-                .setParallelism(1); // Per evitare troppe richieste concorrenti
+                .setParallelism(1);
 
-        // 3. Stampa risultati per debug
         resultStream.print();
 
-        // 4. Esegui
         System.out.println("=== AVVIO JOB FLINK (HTTP Sincrono) ===");
         env.execute("Kafka CDC to HTTP (Sincrono)");
     }
 
-    // Funzione che invia HTTP in modo sincrono (più semplice)
     public static class HttpSender extends RichMapFunction<String, String> {
         private transient CloseableHttpClient httpClient;
         private transient ObjectMapper mapper;
@@ -276,32 +271,77 @@ public class KafkaToHttp {
         @Override
         public String map(String input) throws Exception {
             try {
+                System.out.println("=== RAW KAFKA MESSAGE ===");
+                System.out.println(input);
+
                 // Parsing JSON Debezium
                 JsonNode root = mapper.readTree(input);
-                JsonNode after = root.path("after");
-                String op = root.path("op").asText("u");
 
-                // Crea payload semplificato
-                String payload = mapper.createObjectNode()
-                        .put("operation", op)
-                        .put("timestamp", System.currentTimeMillis())
-                        .set("data", after.isMissingNode() ? root.path("before") : after)
-                        .toString();
+                // Debezium ha questo formato: {"schema":..., "payload":{...}}
+                JsonNode payload = root.path("payload");
+
+                if (payload.isMissingNode()) {
+                    System.out.println("❌ Nessun campo 'payload' trovato");
+                    // Forse è un formato diverso, usa tutto il JSON
+                    payload = root;
+                }
+
+                JsonNode after = payload.path("after");
+                JsonNode before = payload.path("before");
+                String op = payload.path("op").asText("u");
+
+                System.out.println("=== PARSED ===");
+                System.out.println("op: " + op);
+                System.out.println("after: " + after);
+                System.out.println("before: " + before);
+
+                // Crea ObjectNode (mutable) invece di usare JsonNode (immutable)
+                ObjectNode payloadToSend = mapper.createObjectNode();
+                payloadToSend.put("operation", op);
+                payloadToSend.put("timestamp", System.currentTimeMillis());
+
+                // Aggiungi i dati appropriati
+                JsonNode dataToUse;
+                if (op.equals("d")) {
+                    // Delete: usa before
+                    dataToUse = before.isMissingNode() || before.isNull() ?
+                               mapper.createObjectNode() : before;
+                } else {
+                    // Create/Update/Read: usa after
+                    dataToUse = after.isMissingNode() || after.isNull() ?
+                               mapper.createObjectNode() : after;
+                }
+
+                // Usa set() su ObjectNode, non su JsonNode
+                payloadToSend.set("data", dataToUse);
+
+                // Aggiungi anche il payload completo per debug
+                payloadToSend.set("full_debezium_payload", payload);
+
+                String finalPayload = payloadToSend.toString();
+
+                System.out.println("=== PAYLOAD TO SEND ===");
+                System.out.println(finalPayload);
 
                 // Invia HTTP POST
                 HttpPost request = new HttpPost("http://host.docker.internal:3000/events");
                 request.setHeader("Content-Type", "application/json");
                 request.setHeader("User-Agent", "Flink-HTTP/1.0");
-                request.setEntity(new StringEntity(payload, "UTF-8"));
+                request.setEntity(new StringEntity(finalPayload, "UTF-8"));
 
                 HttpResponse response = httpClient.execute(request);
                 int statusCode = response.getStatusLine().getStatusCode();
                 String responseBody = EntityUtils.toString(response.getEntity());
 
+                System.out.println("=== HTTP RESPONSE ===");
+                System.out.println("Status: " + statusCode);
+
                 return String.format("HTTP %d: %s", statusCode,
                         input.substring(0, Math.min(100, input.length())));
 
             } catch (Exception e) {
+                System.out.println("=== ERROR ===");
+                e.printStackTrace();
                 return "ERROR: " + e.getMessage() + " - Input: " +
                        input.substring(0, Math.min(100, input.length()));
             }

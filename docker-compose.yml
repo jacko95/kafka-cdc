@@ -43,10 +43,10 @@ services:
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
     restart: unless-stopped
 
-  connect:
+  debezium:
     image: debezium/connect:2.7.0.Final
-    hostname: connect
-    container_name: connect
+    hostname: debezium
+    container_name: debezium
     ports:
       - "8083:8083"
     #    networks:
@@ -63,14 +63,13 @@ services:
       #      PATH: "/opt/kafka/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       BOOTSTRAP_SERVERS: kafka:29092 # Usa il listener interno di Kafka
       #      GROUP_ID: 1
-      GROUP_ID: "connect-single"
-      CONFIG_STORAGE_TOPIC: connect_configs
-      OFFSET_STORAGE_TOPIC: connect_offsets
-      STATUS_STORAGE_TOPIC: connect_statuses
+      GROUP_ID: "debezium-single"
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-
       #      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       #      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       #      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -78,16 +77,13 @@ services:
       #      KAFKA_PROCESS_ROLES: broker,controller
       #      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       #      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-
-      REST_ADVERTISED_HOST_NAME: connect
-
+      REST_ADVERTISED_HOST_NAME: debezium
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-
     restart: always
   #    command: >
   #      bash -c "
@@ -113,7 +109,19 @@ services:
   #          }
   #        }' &&
   #        echo 'Connector registered (or already exists)' &&
-  #        tail -f /kafka/logs/connect.log"
+  #        tail -f /kafka/logs/connect.log
+  #      "
+
+  init-connector:
+    image: curlimages/curl:8.5.0
+    container_name: init-connector
+    depends_on:
+      debezium:
+        condition: service_started
+    volumes:
+      - ./init-connector.sh:/init-connector.sh
+    entrypoint: ["/bin/sh", "/init-connector.sh"]
+    restart: "no"
 
   # docker exec mysql mysql -u cdc_user -pcdc_password -e "CREATE TABLE db_cdc.utenti (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(255), PRIMARY KEY (id));"
   # docker exec mysql mysql -u cdc_user -pcdc_password -e "USE db_cdc; INSERT INTO utenti (name) VALUES ('ciccio');"
@@ -146,7 +154,7 @@ services:
   # val streamingDF = spark.readStream.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load();
   # val query = streamingDF.selectExpr("CAST(value AS STRING) as json_message").writeStream.outputMode("append").format("console").option("truncate", false).start();
 
-  # spark.read.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load().selectExpr("CAST(value AS STRING) as json").show(false)
+  # spark.readStream.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load().selectExpr("CAST(value AS STRING) as json_message").writeStream.outputMode("append").format("console").option("truncate", false).start();
 
   # val batchDF = spark.read.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").option("endingOffsets", "latest").load().limit(5);
   # batchDF.selectExpr("CAST(value AS STRING) as json").show(false)
@@ -243,6 +251,10 @@ services:
       - ./flink/jars:/opt/flink/usrlib
     restart: unless-stopped
 
+#  docker compose up -d
+#  docker compose down -v
+#  docker rmi kafka-debezium-flink-job --force
+#  docker builder prune -f
 #  docker logs flink-job -f
   flink-job:
 #    image: maven:3.9-eclipse-temurin-11
@@ -258,9 +270,13 @@ services:
 #      - maven-repo:/root/.m2
       - maven-cache:/root/.m2
     depends_on:
-      - kafka
+#      - kafka
 #      - flink-jobmanager
 #      - flink-taskmanager
+      init-connector:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
 #    environment:
 #      FLINK_JOBMANAGER_HOST: flink-jobmanager
 #    command: bash -c "cd /app/source && mvn clean package -DskipTests && java -cp /app/source/target/flink-job-1.0.jar:/opt/flink/lib/* KafkaToHttp"
@@ -297,12 +313,12 @@ services:
     #      - debezium-net
     depends_on:
       - kafka
-      - connect
+      - debezium
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
-      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://debezium:8083
     restart: unless-stopped
 
   phpmyadmin:
@@ -321,17 +337,6 @@ services:
       mysql:
         condition: service_healthy
     restart: unless-stopped
-
-  init-connector:
-    image: curlimages/curl:8.5.0
-    container_name: init-connector
-    depends_on:
-      connect:
-        condition: service_started
-    volumes:
-      - ./init-connector.sh:/init-connector.sh
-    entrypoint: ["/bin/sh", "/init-connector.sh"]
-    restart: "no"
 
 #  jupyter:
 #    image: jupyter/pyspark-notebook:latest

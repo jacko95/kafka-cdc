@@ -56,14 +56,15 @@ async def receive_events(request: Request):
     source = inner_payload.get("source", {})
     
     print("✅ JSON parsato correttamente")
-    print("🔄 Tipo operazione:", op)
+    print(body_str)
+    # print("🔄 Tipo operazione:", op)
     print("📊 Dati (after):", json.dumps(after, indent=2, ensure_ascii=False))
-    if op == "d":
-        print("🗑️  Dati (before):", json.dumps(before, indent=2, ensure_ascii=False))
-    print("🕖 Timestamp evento:", ts_ms)
-    db_name = source.get("db") or source.get("schema") or "N/A"
-    print("🏭 Sorgente:", db_name)
-    print("═" * 80 + "\n")
+    # if op == "d":
+    #     print("🗑️  Dati (before):", json.dumps(before, indent=2, ensure_ascii=False))
+    # print("🕖 Timestamp evento:", ts_ms)
+    # db_name = source.get("db") or source.get("schema") or "N/A"
+    # print("🏭 Sorgente:", db_name)
+    # print("═" * 80 + "\n")
     
     return JSONResponse({
         "status": "ok",
