@@ -41,6 +41,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+    networks:
+      - app-net
     restart: unless-stopped
 
   debezium:
@@ -49,8 +51,8 @@ services:
     container_name: debezium
     ports:
       - "8083:8083"
-    #    networks:
-    #      - debezium-net
+    networks:
+      - app-net
     depends_on:
       kafka:
         condition: service_started
@@ -122,6 +124,8 @@ services:
       - ./init-connector.sh:/init-connector.sh
     entrypoint: ["/bin/sh", "/init-connector.sh"]
     restart: "no"
+    networks:
+      - app-net
 
   # docker exec mysql mysql -u cdc_user -pcdc_password -e "CREATE TABLE db_cdc.utenti (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(255), PRIMARY KEY (id));"
   # docker exec mysql mysql -u cdc_user -pcdc_password -e "USE db_cdc; INSERT INTO utenti (name) VALUES ('ciccio');"
@@ -149,6 +153,8 @@ services:
     command: >
       sh -c "echo '[mysqld]\nlog_bin = mysql-bin\nserver_id = 1\nbinlog_format = ROW\ntransaction-isolation = READ-COMMITTED' > /etc/mysql/conf.d/my.cnf 
       && /usr/local/bin/docker-entrypoint.sh mysqld"
+    networks:
+      - app-net
 
   # docker exec -it spark-master /opt/spark/bin/spark-shell --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2
   # val streamingDF = spark.readStream.format("kafka").option("kafka.bootstrap.servers", "kafka:29092").option("subscribe", "mysql.db_cdc.utenti").option("startingOffsets", "earliest").load();
@@ -164,16 +170,19 @@ services:
   # docker exec -it spark-master /opt/spark/bin/spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
   spark-master:
     image: apache/spark:3.5.1
+#    build:
+#      context: ./spark
+#      dockerfile: Dockerfile
     container_name: spark-master
+    user: root
     hostname: spark-master
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-#    command: >
-#      bash -c "
-#        /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master &
-#        sleep 5 &&
-#        pip install --root-user-action=ignore requests --quiet &&
-#        /opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
-#      "
+#    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    command: >
+      bash -c "
+        /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master & \
+        pip install requests \
+        /opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 --conf spark.jars.ivy=/tmp/.ivy2 /opt/spark/app/kafka_to_http.py
+      "
     environment:
       SPARK_MASTER_HOST: spark-master
       SPARK_MASTER_PORT: 7077
@@ -186,6 +195,8 @@ services:
       - ./spark/app:/opt/spark/app
 #      - ./spark/jars:/opt/spark/jars
     restart: unless-stopped
+    networks:
+      - app-net
 
   spark-worker:
     image: apache/spark:3.5.1
@@ -205,6 +216,8 @@ services:
       - ./spark/app:/opt/spark/app
 #      - ./spark/app:/opt/spark-apps
     restart: unless-stopped
+    networks:
+      - app-net
 
 #  docker exec -it flink-jobmanager bash
 #  docker exec -it flink-jobmanager /opt/flink/bin/sql-client.sh
@@ -234,6 +247,8 @@ services:
     volumes:
       - ./flink/jars:/opt/flink/usrlib  # Cartella per i job JAR
     restart: unless-stopped
+    networks:
+      - app-net
 
   flink-taskmanager:
     image: apache/flink:1.19.0-scala_2.12-java11
@@ -250,6 +265,8 @@ services:
     volumes:
       - ./flink/jars:/opt/flink/usrlib
     restart: unless-stopped
+    networks:
+      - app-net
 
 #  docker compose up -d
 #  docker compose down -v
@@ -273,6 +290,8 @@ services:
 #      - kafka
 #      - flink-jobmanager
 #      - flink-taskmanager
+#      debezium:
+#        condition: service_healthy
       init-connector:
         condition: service_completed_successfully
       kafka:
@@ -280,6 +299,8 @@ services:
 #    environment:
 #      FLINK_JOBMANAGER_HOST: flink-jobmanager
 #    command: bash -c "cd /app/source && mvn clean package -DskipTests && java -cp /app/source/target/flink-job-1.0.jar:/opt/flink/lib/* KafkaToHttp"
+    networks:
+      - app-net
     restart: on-failure
 
   fastapi-flink:
@@ -288,6 +309,8 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    networks:
+      - app-net
 
   flask-spark:
     image: python:3.12-slim
@@ -297,12 +320,25 @@ services:
     volumes:
       - ./flask:/app
     working_dir: /app
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: db_cdc
+      MYSQL_USER: cdc_user
+      MYSQL_PASSWORD: cdc_password
+#    command: >
+#      bash -c "
+#        pip install flask mysql-connector-python --quiet &&
+#        python main.py
+#      "
     command: >
       bash -c "
-        pip install flask --quiet &&
-        python main.py
+        pip install mysql-connector-python flask gunicorn --quiet &&
+        gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --access-logfile - 'main:app'
       "
     restart: unless-stopped
+    networks:
+      - app-net
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -320,6 +356,8 @@ services:
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://debezium:8083
     restart: unless-stopped
+    networks:
+      - app-net
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
@@ -336,6 +374,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+    networks:
+      - app-net
     restart: unless-stopped
 
 #  jupyter:
@@ -351,9 +391,30 @@ services:
 #      - debezium-net
 #    command: start-notebook.sh --NotebookApp.token=''
 
-#networks:
-#  debezium-net:
-#    driver: bridge
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - kafka-ui
+      - debezium
+      - phpmyadmin
+      - fastapi-flink
+      - flask-spark
+      - flink-jobmanager
+      - spark-master
+    networks:
+      - app-net
+    restart: unless-stopped
+
+networks:
+  app-net:
+    driver: bridge
 
 volumes:
   maven-cache: # Crea un volume persistente per le librerie Maven
